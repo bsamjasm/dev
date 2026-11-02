@@ -1,0 +1,241 @@
+name: Build iOS Dev Panel
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Compile Dev IPA
+        run: |
+          test -f dev.html || { echo "dev.html غير موجود بجذر المستودع"; exit 1; }
+          mkdir -p build/Payload/AlbsamDev.app
+
+          cat << 'EOF' > main.swift
+          import UIKit
+          import WebKit
+
+          let devURL = "https://bsamjasm.github.io/dev/dev.html"  // رابط اللوحة (تعدّلها بالمستودع بدون إعادة بناء التطبيق)
+          let bgColor = UIColor(red: 0.043, green: 0.071, blue: 0.125, alpha: 1) // #0b1220
+
+          class VC: UIViewController, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler {
+              var web: WKWebView!
+              override var preferredStatusBarStyle: UIStatusBarStyle { return .lightContent }
+
+              override func viewDidLoad() {
+                  super.viewDidLoad()
+                  view.backgroundColor = bgColor
+                  let cfg = WKWebViewConfiguration()
+                  // نسخ النص للحافظة عبر التطبيق (لأن صفحة محلية لا تدعم navigator.clipboard)
+                  let js = "try{Object.defineProperty(navigator,'clipboard',{value:{writeText:function(t){window.webkit.messageHandlers.copy.postMessage(String(t));return Promise.resolve();}}});}catch(e){}"
+                  cfg.userContentController.addUserScript(WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+                  cfg.userContentController.add(self, name: "copy")
+                  web = WKWebView(frame: .zero, configuration: cfg)
+                  web.uiDelegate = self
+                  web.navigationDelegate = self
+                  let rc = UIRefreshControl()
+                  rc.tintColor = .white
+                  rc.addTarget(self, action: #selector(reloadPage), for: .valueChanged)
+                  web.scrollView.refreshControl = rc
+                  web.isOpaque = false
+                  web.backgroundColor = bgColor
+                  web.scrollView.backgroundColor = bgColor
+                  web.translatesAutoresizingMaskIntoConstraints = false
+                  view.addSubview(web)
+                  NSLayoutConstraint.activate([
+                      web.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+                      web.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+                      web.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                      web.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+                  ])
+                  loadRemote()
+              }
+
+              func loadRemote() {
+                  if let u = URL(string: devURL) { web.load(URLRequest(url: u, cachePolicy: .reloadIgnoringLocalCacheData)) }
+              }
+
+              // نسخة احتياطية داخل التطبيق إذا ما اشتغل الإنترنت
+              func loadLocal() {
+                  if let p = Bundle.main.path(forResource: "dev", ofType: "html") {
+                      let u = URL(fileURLWithPath: p)
+                      web.loadFileURL(u, allowingReadAccessTo: u.deletingLastPathComponent())
+                  }
+              }
+
+              @objc func reloadPage() { loadRemote() }
+
+              func webView(_ w: WKWebView, didFinish n: WKNavigation!) { w.scrollView.refreshControl?.endRefreshing() }
+              func webView(_ w: WKWebView, didFailProvisionalNavigation n: WKNavigation!, withError e: Error) {
+                  w.scrollView.refreshControl?.endRefreshing()
+                  if (e as NSError).code == NSURLErrorCancelled { return }
+                  if w.url == nil || w.url?.scheme != "file" { loadLocal() }
+              }
+
+              func userContentController(_ c: WKUserContentController, didReceive m: WKScriptMessage) {
+                  if m.name == "copy", let s = m.body as? String { UIPasteboard.general.string = s }
+              }
+
+              func webView(_ w: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame f: WKFrameInfo, completionHandler: @escaping () -> Void) {
+                  let a = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+                  a.addAction(UIAlertAction(title: "حسناً", style: .default) { _ in completionHandler() })
+                  present(a, animated: true)
+              }
+              func webView(_ w: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame f: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+                  let a = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+                  a.addAction(UIAlertAction(title: "نعم", style: .destructive) { _ in completionHandler(true) })
+                  a.addAction(UIAlertAction(title: "إلغاء", style: .cancel) { _ in completionHandler(false) })
+                  present(a, animated: true)
+              }
+              func webView(_ w: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame f: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+                  let a = UIAlertController(title: nil, message: prompt, preferredStyle: .alert)
+                  a.addTextField { $0.text = defaultText }
+                  a.addAction(UIAlertAction(title: "موافق", style: .default) { _ in completionHandler(a.textFields?.first?.text) })
+                  a.addAction(UIAlertAction(title: "إلغاء", style: .cancel) { _ in completionHandler(nil) })
+                  present(a, animated: true)
+              }
+          }
+
+          class AppDelegate: UIResponder, UIApplicationDelegate {
+              var window: UIWindow?
+              func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+                  let w = UIWindow(frame: UIScreen.main.bounds)
+                  w.rootViewController = VC()
+                  w.makeKeyAndVisible()
+                  window = w
+                  return true
+              }
+          }
+
+          UIApplicationMain(CommandLine.argc, CommandLine.unsafeArgv, nil, NSStringFromClass(AppDelegate.self))
+          EOF
+
+          cat << 'EOF' > LaunchScreen.storyboard
+          <?xml version="1.0" encoding="UTF-8"?>
+          <document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="21507" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" launchScreen="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="01J-lp-oVM">
+              <scenes>
+                  <scene sceneID="EHf-IW-A2E">
+                      <objects>
+                          <viewController id="01J-lp-oVM" sceneMemberID="viewController">
+                              <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
+                                  <rect key="frame" x="0.0" y="0.0" width="375" height="667"/>
+                                  <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                                  <color key="backgroundColor" red="0.043" green="0.071" blue="0.125" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                              </view>
+                          </viewController>
+                          <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" userLabel="First Responder" sceneMemberID="firstResponder"/>
+                      </objects>
+                  </scene>
+              </scenes>
+          </document>
+          EOF
+
+          xcrun ibtool --compile build/Payload/AlbsamDev.app/LaunchScreen.storyboardc LaunchScreen.storyboard --target-device iphone --target-device ipad --minimum-deployment-target 15.0 --errors --warnings
+
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos swiftc main.swift \
+            -target arm64-apple-ios15.0 \
+            -sdk "$SDK_PATH" \
+            -framework UIKit \
+            -framework WebKit \
+            -framework Foundation \
+            -o build/Payload/AlbsamDev.app/AlbsamDev
+
+          chmod +x build/Payload/AlbsamDev.app/AlbsamDev
+
+          # نسخة احتياطية داخل التطبيق (الأساس يحمّل من الإنترنت)
+          cp dev.html build/Payload/AlbsamDev.app/dev.html
+
+          ICON=""
+          for f in apple-touch-icon.png icon-512.png icon-192.png; do
+            if [ -f "$f" ]; then ICON="$f"; break; fi
+          done
+          if [ -n "$ICON" ]; then
+            sips -s format png -z 120 120 "$ICON" --out build/Payload/AlbsamDev.app/AppIcon60x60@2x.png || true
+            sips -s format png -z 180 180 "$ICON" --out build/Payload/AlbsamDev.app/AppIcon60x60@3x.png || true
+          fi
+
+          cat << 'EOF' > build/Payload/AlbsamDev.app/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>AlbsamDev</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.bsamjasm.albsamdev</string>
+              <key>CFBundleName</key>
+              <string>Albsam Licenses</string>
+              <key>CFBundleDisplayName</key>
+              <string>Albsam Licenses</string>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleLocalizations</key>
+              <array>
+                  <string>en</string>
+                  <string>ar</string>
+              </array>
+              <key>CFBundleVersion</key>
+              <string>1.0</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>MinimumOSVersion</key>
+              <string>15.0</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>UILaunchStoryboardName</key>
+              <string>LaunchScreen</string>
+              <key>UIDeviceFamily</key>
+              <array>
+                  <integer>1</integer>
+                  <integer>2</integer>
+              </array>
+              <key>UIRequiredDeviceCapabilities</key>
+              <array>
+                  <string>arm64</string>
+              </array>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+              </array>
+              <key>UISupportedInterfaceOrientations~ipad</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+              <key>CFBundleIcons</key>
+              <dict>
+                  <key>CFBundlePrimaryIcon</key>
+                  <dict>
+                      <key>CFBundleIconFiles</key>
+                      <array>
+                          <string>AppIcon60x60</string>
+                      </array>
+                  </dict>
+              </dict>
+          </dict>
+          </plist>
+          EOF
+
+          # الاسم العربي على الشاشة
+          for L in en ar; do
+            mkdir -p build/Payload/AlbsamDev.app/$L.lproj
+            printf '"CFBundleDisplayName" = "تراخيص مجمع البسام";\n' > build/Payload/AlbsamDev.app/$L.lproj/InfoPlist.strings
+          done
+
+          codesign --force --deep --sign - build/Payload/AlbsamDev.app
+          cd build && zip -r dev.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-ipa
+          path: build/dev.ipa
